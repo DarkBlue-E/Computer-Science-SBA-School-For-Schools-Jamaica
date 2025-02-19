@@ -14,19 +14,28 @@
 #define LVL_WARN "Warning: "
 #define LVL_ERROR "ERROR: "
 #define LVL_FATAL "FATAL: "
+#define LVL_DEBUG "DEBUG: "
 
 // Log message type enumeration
-#define FILE_UNREADABLE 0
-#define FILE_CORRUPT 1
-#define SYS_ERROR 2
+#define FILE_UNREADABLE 1
+#define FILE_CORRUPT 2
+#define SYS_ERROR 3
+
+// Trim mode enumeration
+#define LTRIM -1
+#define FTRIM  0
+#define RTRIM  1
 
 // Screen display properties (measured in characters)
-static int SCREEN_SZ = 120;
-static int SCREEN_PADDING = 5;
+static int SCR_SIZE = 120;
+static int SCR_PADDING = 5;
 
 // Synchronized read settings
 static int FILE_READ_FRQ = 20;      // no. of retries upon read failure
 static int FILE_READ_LAT = 50;      // wait interval between each retry (in milliseconds)
+
+// Debug log level activation flag
+static int DEBUG_MODE = 0;
 
 // Mandatory function prototype declarations
 static void *get_console();
@@ -60,7 +69,7 @@ void printScrHVMargin(int hMargin, int vMargin) {
 }
 
 void printScrMargin(int vMargin) {
-    printScrHVMargin(SCREEN_PADDING, vMargin);
+    printScrHVMargin(SCR_PADDING, vMargin);
 }
 
 void printScrPat(const char* pre_pat, const char* pattern, int repeat, const char* pst_pat) { 
@@ -76,31 +85,38 @@ void printScrPat(const char* pre_pat, const char* pattern, int repeat, const cha
 void printScrTitle(const char* pre_pat, const char* title, const char* pst_pat) {
 
     const int TTL_SZ = title ? strlen(title) : 0;
-    const int DEF_PADDING = (SCREEN_SZ - TTL_SZ) / 2;
+    const int DEF_MRGN = (SCR_SIZE - TTL_SZ) / 2;
 
-    int padding = DEF_PADDING - getPrintableCharCnt(pre_pat);
+    int margin = DEF_MRGN;
 
-    if (pre_pat) 
+    if (pre_pat) {
+        margin -= strlen(pre_pat);
         printf (pre_pat);
+    }
     if (title) 
-        printf ("%*s", (padding < 0 ? 0 : padding) + TTL_SZ, title);
+        printf ("%*s", (margin < 0 ? 0 : margin) + TTL_SZ, title);
     if (pst_pat) 
-        printf ("%*s", (padding < 0 ? padding : 0) + DEF_PADDING, pst_pat);    
+        printf ("%*s", (margin < 0 ? margin : 0) + DEF_MRGN, pst_pat);    
 }
 
-void printScrTopic(const char* caption, const char* pattern, int margin, const int ovr_bnd_flg) {
-    if (caption) {
-        printScrHMargin(margin);
-        printf("%s\n", caption);
-
+void printScrTopic(const char* caption, int cap_sz, const char* pattern, int margin, const int ovr_bnd_flg) 
+{
+    if (caption || cap_sz >= 0) {
+        if (caption) {
+            printScrHMargin(margin);
+            printf("%s\n", caption);
+        }
         if (pattern) {
             int reps = 0;
-            int len  = strlen(caption);
-            int len2 = strlen(pattern);
+            int pat_sz = strlen(pattern);
+
+            if (pat_sz > 0) 
+            {
+                if (cap_sz < 0)
+                    cap_sz = strlen(caption);
             
-            if (len2 > 0) {
-                reps = len / len2 - 1; 
-                if (ovr_bnd_flg > 0 && len % len2 > 0)
+                reps = cap_sz / pat_sz - 1; 
+                if (ovr_bnd_flg > 0 && cap_sz % pat_sz > 0)
                     reps++;
             }
             printScrHMargin(margin);
@@ -109,24 +125,52 @@ void printScrTopic(const char* caption, const char* pattern, int margin, const i
     }
 }
 
-void printScrHeader(const char* col_txt1, int col_sz1, const char* col_txt2, int col_sz2,   // supports up to 5 columns
-                    const char* col_txt3, int col_sz3, const char* col_txt4, int col_sz4, 
-                    const char* col_txt5, int col_sz5, const char* pattern, int margin) 
+int printScrHeader(const char* col_txt1, int col_sz1, const char* col_txt2, int col_sz2,   // supports up to 5 columns
+                   const char* col_txt3, int col_sz3, const char* col_txt4, int col_sz4, 
+                   const char* col_txt5, int col_sz5, const char* pattern, int margin) 
 {   
-    char* hdr = calloc(SCREEN_SZ, sizeof(char));
+    int hdr_sz = 0;
 
-    if (col_txt1)
-        sprintf(hdr, "%-*s", col_sz1, col_txt1);
-    if (col_txt2)
-        sprintf(hdr, "%-*s", col_sz2, col_txt2);
-    if (col_txt3)
-        sprintf(hdr, "%-*s", col_sz3, col_txt3);
-    if (col_txt4)
-        sprintf(hdr, "%-*s", col_sz4, col_txt4);
-    if (col_txt5)
-        sprintf(hdr, "%-*s", col_sz5, col_txt5);
+    if (col_txt1) {
+        hdr_sz += (col_sz1 = abs(col_sz1));
+    }
+    if (col_txt2) {
+        hdr_sz += (col_sz2 = abs(col_sz2));
+    }
+    if (col_txt3) {
+        hdr_sz += (col_sz3 = abs(col_sz3));
+    }
+    if (col_txt4) {
+        hdr_sz += (col_sz4 = abs(col_sz4));
+    }
+    if (col_txt5) {
+        hdr_sz += (col_sz5 = abs(col_sz5));
+    }
 
-    printScrTopic(hdr, pattern, margin, 1);
+    if (margin < 0)
+        margin = (SCR_SIZE - hdr_sz) / 2;
+
+    printScrHMargin(margin);
+
+    if (col_txt1) {
+        printScrColText(col_txt1, col_sz1, NULL);
+    }
+    if (col_txt2) {
+        printScrColText(col_txt2, col_sz2, NULL);
+    }
+    if (col_txt3) {
+        printScrColText(col_txt3, col_sz3, NULL);
+    }
+    if (col_txt4) {
+        printScrColText(col_txt4, col_sz4, NULL);
+    }
+    if (col_txt5) {
+        printScrColText(col_txt5, col_sz5, NULL);
+    }
+
+    printScrTopic("", hdr_sz, pattern, margin, 1);
+
+    return margin;
 }
 
 void printScrColText(const char* col_txt, int col_txt_sz, const char* pst_txt) {
@@ -138,7 +182,7 @@ void printScrColText(const char* col_txt, int col_txt_sz, const char* pst_txt) {
 
 void printScrColVal(float col_val, int col_val_sz, int col_val_prec, const char* pst_txt) {
     
-    printf ("%-*.*f", col_val_sz, col_val_prec < 0 ? 0 : col_val_prec, col_val); 
+    printf ("%-*.*f", col_val_sz, col_val_prec < 0 ? 0 :col_val_prec, col_val); 
     
     if (pst_txt)
         printf (pst_txt);
@@ -159,50 +203,47 @@ void msleep(int delay) {   // delay in milliseconds
 #endif
 }
 
-char *trim (char* str, int str_sz, char* trstr) 
-{
+char *trim (char* str, int str_sz, char* trstr, const int tr_mode)  // if trstr is provided,   
+{                                                                   // it must have a size at least 1 character greater than str
     if (str == NULL)  
         return str; 
 
     if (str_sz < 0)
         str_sz = strlen(str);
 
-    if (str_sz == 0)  
-        return str; 
-
-    if(trstr == NULL)
-        trstr = str;
-
-    int end = str_sz - 1, j = 0;
-    while (j++ < end && isspace(*str)) {
-        str++; str_sz--;
+    if (trstr == NULL) {
+        if(str_sz == 0)  
+            return str; 
+        else
+            trstr = str;
     }
-    end = str_sz - 1;
-    while (end >= 0 && isspace(str[end])) {
-        end--; str_sz--;
+
+    int st, end = str_sz - 1;
+
+    if (tr_mode <= 0) 
+    {
+        st = 0;
+        while (st++ < end && isspace(*str)) {
+            str++; str_sz--;
+        }
+        end = str_sz - 1;
     }
+
+    if (tr_mode >= 0) {
+        while (end >= 0 && isspace(str[end])) {
+            end--; str_sz--;
+        }
+    }
+
     if (end >= 0 && str[end])
         str_sz++;
 
-    for (j = 0; j <= end; j++, str++) {
-        trstr[j] = *str;
+    for (st = 0; st <= end; st++, str++) {
+        trstr[st] = *str;
     }
-    trstr[str_sz-1 < 0? 0: str_sz-1] = '\0'; 
+    trstr[str_sz < 1 ? 0 : str_sz-1] = '\0'; 
 
     return trstr;
-}
-
-int getPrintableCharCnt(const char* str) {
-    int count = 0;
-    if (str) {
-        int len = strlen(str);
-        for (int i=0; i < len; i++) {
-            if (isprint(str[i])) {
-                count++;
-            }
-        }
-    }
-    return count;
 }
 
 int isDigitStr(const char* str) {
@@ -326,22 +367,23 @@ void pauseScr(const char * message, const int alt_msg_flg) {
 
 void log(char* level, int msg_type, char* msg_arg, char* msg_pst, FILE* ostream) {
 
-    if (!level) level = "";
+    if (!level) level = LVL_INFO;
     if (!msg_pst) msg_pst = "";
 
-    switch(msg_type) {
-        case FILE_UNREADABLE:
-            fprintf(ostream, "%s%s does not exist or cannot be opened. %s", level, msg_arg, msg_pst);
-            break;
-        case FILE_CORRUPT:
-            fprintf(ostream, "%s%s is empty, corrupted or cannot be read. %s", level, msg_arg, msg_pst);
-            break;
-        case SYS_ERROR:
-            fprintf(ostream, "%sAn unexpected system error has occurred! %s", level, msg_pst);
-            break;
-        default:
-            fprintf(ostream, "%s%s", level, msg_pst);
-    }
+    if (level != LVL_DEBUG || DEBUG_MODE)
+        switch(msg_type) {
+            case FILE_UNREADABLE:
+                fprintf(ostream, "%s%s does not exist or cannot be opened. %s", level, msg_arg, msg_pst);
+                break;
+            case FILE_CORRUPT:
+                fprintf(ostream, "%s%s is empty, corrupted or cannot be read. %s", level, msg_arg, msg_pst);
+                break;
+            case SYS_ERROR:
+                fprintf(ostream, "%sAn unexpected system error has occurred! %s", level, msg_pst);
+                break;
+            default:
+                fprintf(ostream, "%s%s", level, msg_pst);
+        }
 }
 
 static void *get_console() {
