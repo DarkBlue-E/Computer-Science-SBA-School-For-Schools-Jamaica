@@ -4,16 +4,22 @@
 #include <time.h>
 #include "screenio.h"
 
+#define APP_MODE DEVELOPER_MODE   // primary use is to toggle DEBUG_MODE 
+
+// Application mode enumeration
+#define DEVELOPER_MODE LG_MODE_CONSL
+#define RELEASE_MODE LG_MODE_OFF
+
 // Application resource properties
 #define TTL_MAIN "FOR SCHOOLS OF JAMAICA"
 #define PTR_SZ 8
-#define MEM_EXT_SZ 10  // fixed capacity increment to be applied when extending a dynamic list
+#define MEM_EXT_SZ 10  // fixed capacity increment to be applied when extending a dynamic list (also serves as the minimum capacity)
 
 // Screen display column max sizes (measured in characters)
 #define ITEM_NO_SZ 4  
 #define FULL_NAME_SZ 50  
 #define SUBJ_NAME_SZ 30
-#define GRADE_SZ 4
+#define GRADE_SZ 6
 
 // User attribute max sizes
 #define FNAME_SZ 14
@@ -42,6 +48,16 @@
 #define SEP 9
 #define NOV 11
 
+// Log message type enumeration
+#define FILE_UNREADABLE 1
+#define FILE_UNWRITABLE 2
+#define FILE_CORRUPT    3
+// Other warn type enumeration
+#define REFRESH_ERROR   4
+
+// Application log resources
+#define APP_LOG_FILENAME "AppLog.txt"
+#define APP_LOG_TITLE "'FOR SCHOOLS OF JAMAICA' Application Log"
 // Data entry file resources
 #define PRINCIPAL_DATA_FILENAME "Principal.txt"
 #define TEACHER_DATA_FILENAME "Teachers.txt"
@@ -51,23 +67,26 @@
 #define UNSPEC_DATA "<NONE>"   // frontend view label shown in the place of values not yet assigned or set
 #define BLANK_DATA "<BLANK>"   // backend data label used in place of string values that are empty 
 // Log messages
-#define MSG_ACTION_CONTD "The current action may continue but render inconsistent results."
-#define MSG_ACTION_ABORT "The current action will be aborted."
-#define MSG_SAVE_ERROR   "The current changes may not be preserved."
+#define MSG_ACT_CONTD  "The current action may continue but render inconsistent results."
+#define MSG_ACT_ABORT  "The current action will be aborted."
+#define MSG_SAVE_ERROR "The current changes may not be preserved."
 
 // User type enumeration
-#define USR_STUDENT 1
-#define USR_TEACHER 2
+#define USR_STUDENT   1
+#define USR_TEACHER   2
 #define USR_PRINCIPAL 3
 // Other data list type enumeration
-#define LST_ENROLL 4
-#define LST_SUBJECT 5
-#define LST_DEFAULT 6
+#define LST_ENROLL    4
+#define LST_SUBJECT   5
+#define LST_DEFAULT   6
 
 // User registration status enumeration
 #define REG_STAT_PROF 0
 #define REG_STAT_SUBJ 1
 #define REG_STAT_FULL 2
+// Subject actions enumeration
+#define SUBJ_ACT_ADD  2
+#define SUBJ_ACT_EDIT 3
 
 // User default timeout (in minutes)
 #define TM_DEF_STUDENT   10
@@ -97,22 +116,23 @@ typedef struct UserEntry User;
 typedef struct EnrollEntry Enrollment;
 
 // Elementary size definition caching
+const int CHAR_SZ = sizeof(char);
 const int USER_SZ = sizeof(User);
 const int ENROLL_SZ = sizeof(Enrollment);
 const int SUBJECT_SZ = sizeof(char*);
 
+int SUBJECTS_SZ = 6;
 const char* SUBJECTS[] = {"Mathematics","English","Spanish","Computing","Biology","Physics"};
-const int SUBJECTS_SZ = 6;
 
-User TEACHERS [6];
 int TEACHERS_SZ = 6;
+User TEACHERS [6];
 
+int principalCapacity = 1, studentCapacity;
 User Principal, *Students;
-int principalCapacity = 1;
-int studentCapacity = 0;
 
+int enrollCapacity;
 Enrollment *Enrollments;
-int enrollCapacity = 0;
+
 User DEF_USER;
 Enrollment DEF_ENROLL;
 
@@ -134,7 +154,7 @@ User *loadUserData(User *list, int *list_sz_ptr, FILE *fptr)  // NOTE: can produ
     int data_sz = *list_sz_ptr;
 
     if(!freadInt(&data_sz, fptr)) 
-            return NULL;
+        return NULL;
 
     if(*list_sz_ptr != data_sz ||!list) 
     {
@@ -193,8 +213,7 @@ FILE *saveUserData(User *list, int list_sz, FILE *fptr)
     if (fprintf (fptr, "%d\n", getListEntryCnt(list, list_sz)) <= 0)
         return NULL;
 
-    for (int i = 0; i < list_sz; i++) 
-    {
+    for (int i = 0; i < list_sz; i++) {
         u = list + i;
         if (u->loginID > 0) {
             if (fprintf (fptr, "%d\n%s\n%s\n%s\n%s\n%d\n%d\n", 
@@ -212,8 +231,7 @@ FILE *saveEnrollData(Enrollment *list, int list_sz, FILE *fptr)
     if (fprintf (fptr, "%d\n", getListEntryCnt(list, list_sz)) <= 0)
         return NULL;
 
-    for (int i = 0; i < list_sz; i++) 
-    {
+    for (int i = 0; i < list_sz; i++) {
         e = list + i;
         if (e->subjectID > 0) {
             if (fprintf (fptr, "%d\n%d\n%d\n%.2f\n", e->studentID, e->teacherID, e->subjectID, e->grade) <= 0)
@@ -250,7 +268,7 @@ FILE *stageData(void *list, int *list_sz_ptr, const char *DATA_FNAME, const int 
 
 int persistData(void *list, int list_sz, FILE *fptr) { // used to conclude a transaction operation
     void *ptr;
-    
+  
     if (list == Enrollments) {
         ptr = saveEnrollData ((Enrollment*)list, list_sz, fptr);
     } else {
@@ -274,12 +292,25 @@ char* getFullName(User* usr) {
     return NULL;
 }
 
+char* getRegStatDesc(int reg_stat_code, const int short_desc_flg) {
+    switch (reg_stat_code) {
+        case REG_STAT_PROF:
+            return short_desc_flg? "CREATED":"Pending Profile";
+        case REG_STAT_SUBJ:
+            return short_desc_flg? "PROFILED":"Pending Enrollment";
+        case REG_STAT_FULL:
+            return short_desc_flg? "FULL":"Completed";
+        default:
+            return NULL;
+    }
+}
+
 char* getTitle(const char* pre_ttl, int lst_type, const char* pst_ttl) {
 
     static char* title;
 
     if (!title)
-        title = malloc(SCR_SIZE);
+        title = malloc(SCR_SIZE * CHAR_SZ);
 
     strcpy(title, "");  // clears any previously set title
     
@@ -371,7 +402,7 @@ int* getDataListSz(int lst_type) {
 
 int getListEntryCnt(void *list, int list_sz) {
     int cnt = 0;
-    char *subj, trsubj[SUBJ_NAME_SZ + 1];
+    char *subj;
     Enrollment *enroll;
     User *usr;
 
@@ -379,7 +410,7 @@ int getListEntryCnt(void *list, int list_sz) {
         if (list == SUBJECTS) 
         {
             subj = *((char**)list + i);
-            if (subj && strlen(trim(subj, -1, trsubj, 0)) > 0)
+            if (!isEmptyStr(subj, 1, NULL))
                 cnt++;
         }
         else if (list == Enrollments) 
@@ -402,7 +433,7 @@ void init(void *list, int lst_type, int offset, int count)
 {
     if (lst_type == LST_DEFAULT) {
         memset(list+offset, 0, count);
-    }
+    } 
     else
     for (int i=offset; i < offset + count; i++) {
         if (lst_type == LST_ENROLL)
@@ -423,7 +454,7 @@ void* setDataListSz(void *list, int list_sz) {
         data_sz = USER_SZ;
     }
 
-    new_list = realloc(list, list_sz * data_sz);
+    new_list = realloc(list, (list_sz < MEM_EXT_SZ? MEM_EXT_SZ:list_sz) * data_sz);
 
     if (new_list) {
         // determine the list to set based on the list identified
@@ -471,7 +502,7 @@ User* addUser(User *usr, User *list, int *list_sz_ptr) {
     return NULL;
 }
 
-Enrollment* addEnrollment(Enrollment *enroll) {
+Enrollment* addEnrollment(Enrollment *enroll, Enrollment *list, int *list_sz_ptr) {
     // handle null reference
     if (!enroll) {
         return enroll;
@@ -479,17 +510,17 @@ Enrollment* addEnrollment(Enrollment *enroll) {
 
     // add enrollment to available tombstoned slot (if any)
     int i;
-    for (i = 0; i < enrollCapacity; i++) {
-        if (Enrollments[i].subjectID <= 0) {
-            Enrollments[i] = *enroll;
-            return (Enrollment*)(Enrollments + i);
+    for (i = 0; i < *list_sz_ptr; i++) {
+        if (list[i].subjectID <= 0) {
+            list[i] = *enroll;
+            return (Enrollment*)(list + i);
         }
     }
 
     // increase slot capacity and add enrollment at the end
-    if (extDataListSz(Enrollments, &enrollCapacity, LST_ENROLL)) {
-        Enrollments[i] = *enroll;
-        return (Enrollment*)(Enrollments + i);
+    if (extDataListSz(list, list_sz_ptr, LST_ENROLL)) {
+        list[i] = *enroll;
+        return (Enrollment*)(list + i);
     }
     return NULL;
 }
@@ -531,7 +562,7 @@ Enrollment* registerEnrollment(int studID, int subjID, int teachID)
 {    
     Enrollment new_enroll = {studID, subjID, teachID, -1};
 
-    return addEnrollment(&new_enroll);
+    return addEnrollment(&new_enroll, Enrollments, &enrollCapacity);
 }
 
 User* getUser(int loginID, User* list, int list_sz) {
@@ -546,62 +577,6 @@ User* getUser(int loginID, User* list, int list_sz) {
 User* userSearch(int loginID, int usr_type) 
 {
     return getUser(loginID, (User*)getDataList(usr_type), *getDataListSz(usr_type));
-}
-
-int getEnrollEntryID(int usr_type, Enrollment* enroll) 
-{   
-    if (!enroll) return 0;
-
-    switch (usr_type) 
-    {
-        case USR_STUDENT:
-            return enroll->studentID;
-        case USR_TEACHER:
-            return enroll->teacherID;
-        default:
-           return enroll->subjectID;     
-    }
-}
-
-int enrollSearch(int entryID, int usr_type, int tgt_usr_type, Enrollment* *res_list, int res_limit) 
-{   
-    //Warning: if res_list is provided, res_limit should not exceed the actual capacity of res_list  
-    int entry_cnt = 0;
-    int entry_id, j;
-    Enrollment* enroll;
-
-    if (res_limit < 0) {
-        res_limit = enrollCapacity;
-    }
-    if (res_list) { 
-        init (res_list, LST_DEFAULT, 0, res_limit);  //ensure list is properly initialized
-    } else if (enrollCapacity > 0) {
-        res_list = calloc(res_limit, PTR_SZ);  //provide local buffer list 
-    }
-
-    for (int i=0; i < enrollCapacity; i++)
-    {
-        enroll = Enrollments+i;
-
-        if (entryID == getEnrollEntryID(usr_type, enroll)) 
-        {
-            entry_id = getEnrollEntryID(tgt_usr_type, enroll);
-
-            for (j=0; j < entry_cnt; j++) 
-            {  //prevents duplicate addition of enrollment entries
-                if (entry_id == getEnrollEntryID(tgt_usr_type, res_list[j])) {
-                    break;
-                }
-            }
-            if (j == entry_cnt) {
-                if (entry_cnt < res_limit)
-                    res_list[entry_cnt++] = enroll;
-                else
-                    return -1;  //search results exceed limit
-            }
-        }
-    }
-    return entry_cnt;
 }
 
 Enrollment* getEnrollment(int entryID, int usr_type, Enrollment* list, int list_sz) {
@@ -628,18 +603,68 @@ Enrollment* getEnrollPtr(int entryID, int usr_type, Enrollment** list, int list_
     return NULL;
 }
 
+int getEnrollEntryID(int usr_type, Enrollment* enroll) 
+{   
+    if (!enroll) return 0;
+
+    switch (usr_type) 
+    {
+        case USR_STUDENT:
+            return enroll->studentID;
+        case USR_TEACHER:
+            return enroll->teacherID;
+        default:
+           return enroll->subjectID;     
+    }
+}
+
+int enrollSearch(int entryID, int usr_type, int tgt_usr_type, int offset, Enrollment* *res_list, int res_limit) 
+{   
+    //Warning: if res_list is provided, res_limit should not exceed the actual capacity of res_list  
+    int entry_id, entry_cnt = 0;
+    Enrollment* enroll;
+
+    if (res_limit < 0) {
+        res_limit = enrollCapacity;
+    }
+    if (res_list) { 
+        init (res_list, LST_DEFAULT, 0, res_limit);  //ensure list is properly initialized
+    } else if (enrollCapacity > 0) {
+        res_list = calloc(res_limit, PTR_SZ);  //provide local buffer list 
+    }
+
+    for (int i = abs(offset); i < enrollCapacity; i++)
+    {
+        enroll = Enrollments+i;
+
+        if (entryID == getEnrollEntryID(usr_type, enroll)) 
+        {
+            entry_id = getEnrollEntryID(tgt_usr_type, enroll);
+
+            // prevents duplicate addition of enrollment entries
+            if (!getEnrollPtr(entry_id, tgt_usr_type, res_list, entry_cnt)) {
+                if (entry_cnt < res_limit)
+                    res_list[entry_cnt++] = enroll;
+                else
+                    return -i;  //search results exceed limit
+            }
+        }
+    }
+    return entry_cnt;
+}
+
 int getAvlSubjects(int entryID, int usr_type, int* subj_buf)  // get available subjects for user
 {  
-    Enrollment* enroll_buf[enrollCapacity];
+    Enrollment* enroll_ptr_buf[enrollCapacity];
     int total, avl_total;
 
-    total = enrollSearch(entryID, usr_type, NULL, enroll_buf, -1); 
+    total = enrollSearch(entryID, usr_type, NULL, 0, enroll_ptr_buf, -1); 
     avl_total = SUBJECTS_SZ - total;
 
     if (avl_total > 0 && subj_buf) {  // populate subj_buf with indexes of available subjects
         for (int i=0, j=0; i < SUBJECTS_SZ; i++) 
         {
-            if (!getEnrollPtr(i+1, NULL, enroll_buf, total)) {
+            if (!getEnrollPtr(i+1, NULL, enroll_ptr_buf, total)) {
                 subj_buf [j++] = i;
             }
         }
@@ -648,10 +673,10 @@ int getAvlSubjects(int entryID, int usr_type, int* subj_buf)  // get available s
 }
 
 int calculateTally(int entryID, int usr_type, int tgt_usr_type) {
-    return enrollSearch(entryID, usr_type, tgt_usr_type, NULL, -1);
+    return enrollSearch(entryID, usr_type, 0, tgt_usr_type, NULL, -1);
 }
 
-float calculateGradeAvg(int entryID) {
+float calculateGradeAvg(int entryID, int usr_type) {
     float sum = 0;
     int count = 0;
     Enrollment* enroll;
@@ -660,7 +685,7 @@ float calculateGradeAvg(int entryID) {
     {
         enroll = Enrollments + i;
         
-        if ((entryID <= 0  || entryID == enroll->studentID || entryID == enroll->teacherID || entryID == enroll->subjectID) && enroll->grade >= 0) {
+        if (enroll->grade >= 0 && (entryID <= 0  || entryID == getEnrollEntryID(usr_type, enroll))) {
             sum += enroll->grade;
             count++;
         }
@@ -674,7 +699,8 @@ float calculateGradeAvg(int entryID) {
 
 int calculateAge(Date* tm_dob, const char* str_dob) {
     //parse date of birth
-    if (!tm_dob) {
+    if (!tm_dob) 
+    {
         Date tm_buf;
         if (!(str_dob && convertDate(str_dob, &tm_buf))) {
             return 0;
@@ -710,7 +736,7 @@ int convertDate(const char* dstr, Date* dptr) {  // Gregarian-based validation d
 
     //copy date to editable string
     int str_len = strlen(dstr);
-    char* dt = malloc(str_len + 1);
+    char* dt = malloc((str_len + 1) *CHAR_SZ);
     char c;
 
     for (int i=0; i < str_len; i++) {
@@ -756,7 +782,6 @@ int convertDate(const char* dstr, Date* dptr) {  // Gregarian-based validation d
 
     if (dy > (isLeapYear(yr)? 29:28) && mn == FEB) 
         return 0;
-
     
     if (dptr) {
         //use local time settings to properly initialize date
@@ -782,15 +807,15 @@ int hash(int loginID) {
 }
 
 int skpdtl(char *input) {
-    return !input || strlen(input) == 0;
+    return isEmptyStr(input, 0, NULL);
 }
 
 const char *fsan(const char* attr) { // sanitize blank user data attribute for file storage
-    return !attr || !strlen(attr) ? BLANK_DATA : attr;
+    return isEmptyStr(attr, 0, NULL) ? BLANK_DATA : attr;
 }
 
 const char *vsan(const char* attr) { // sanitize blank user data attribute for on-screen viewing
-    return !attr || !strlen(attr) || !strcmp(attr, BLANK_DATA)? UNSPEC_DATA : attr;
+    return isEmptyStr(attr, 0, NULL) || !strcmp(attr, BLANK_DATA)? UNSPEC_DATA : attr;
 }
 
 void printMargin() {
@@ -801,32 +826,254 @@ void printTopic(char* caption) {
     printScrTopic (caption, -1, "-", 0, 1);
 }
 
-int print3ColTblHdr(const char* col_txt1, int col_sz1, 
-                     const char* col_txt2, int col_sz2, 
-                     const char* col_txt3, int col_sz3) 
+int print2ColTblHdr(const char* col_txt1, int col_sz1, const char* col_txt2, int col_sz2) 
 {
-    return print4ColTblHdr (col_txt1, col_sz1, col_txt2, col_sz2, col_txt3, col_sz3, NULL, 0);
+    return print4ColTblHdr (col_txt1, col_sz1, col_txt2, col_sz2, NULL, 0, NULL, 0);
 }
 
 int print4ColTblHdr(const char* col_txt1, int col_sz1, const char* col_txt2, int col_sz2, 
                      const char* col_txt3, int col_sz3, const char* col_txt4, int col_sz4) 
 {
-    return printScrHeader (col_txt1, col_sz1, col_txt2, col_sz2, col_txt3, col_sz3, col_txt4, col_sz4, NULL, 0, "=", -1);
+    return print6ColTblHdr (col_txt1, col_sz1, col_txt2, col_sz2, col_txt3, col_sz3, col_txt4, col_sz4, NULL, 0, NULL, 0);
 }
 
-void warn(int msg_type, char* msg_arg, char* msg_pst) {
-    log (LVL_WARN, msg_type, msg_arg, msg_pst, stdout);
-}
-
-void sys_err(const char* lg_lvl, char* msg_pst) 
+int print6ColTblHdr(const char* col_txt1, int col_sz1, const char* col_txt2, int col_sz2, 
+                     const char* col_txt3, int col_sz3, const char* col_txt4, int col_sz4, 
+                     const char* col_txt5, int col_sz5, const char* col_txt6, int col_sz6) 
 {
-    if (!lg_lvl) lg_lvl = LVL_ERROR;
- 
-    char lvl [strlen(lg_lvl) + 2]; 
-    sprintf(lvl, "\n%s", lg_lvl);
+    return printScrHeader (col_txt1, col_sz1, col_txt2, col_sz2, col_txt3, col_sz3, col_txt4, col_sz4, col_txt5, col_sz5, col_txt6, col_sz6, "=", -1);
+}
 
-    log (lvl, SYS_ERROR, NULL, msg_pst, stdout);
+printGrade(float grade, const char* pst_txt) {
+    if(grade < 0)
+        printScrColText(UNSPEC_DATA, 0, NULL);   
+    else 
+        printScrColVal(grade, 0, 0, "%%");
+    if (pst_txt)
+        printf(pst_txt); 
+}
+
+int initLogFile() 
+{    
+    FILE* fptr  = fopen(APP_LOG_FILENAME, "r");
+    
+    if (fptr) {  // log file already created
+        fclose(fptr);
+        return 0;
+    } else {  // create and prep log file
+        int fresult = scrLogInit(NULL);
+
+        if (fresult == 0) {
+            fresult = -1;
+        }
+        return fresult;
+    }  
+}
+
+void info(int tMargin, int bMargin, char* msg, const int cntd_lg_flg) 
+{
+    printScrVMargin(tMargin - (cntd_lg_flg? 0:1));
+
+    if ( !(cntd_lg_flg && isEmptyStr(msg, 0, NULL)) ) 
+    {
+        if (!msg) msg = "";
+        scrLog(LVL_INFO, "INFO: ", msg, LG_MODE_FILE, -1, cntd_lg_flg);
+        scrInf(NULL, msg, cntd_lg_flg);
+    }
+
+    printScrVMargin(bMargin);
+}
+
+void warn(int msg_type, char* msg_arg, char* msg_pst, const int cntd_lg_flg) 
+{
+    char msg[SCR_SIZE];
+
+    if (!msg_pst) msg_pst = "";
+
+    switch(msg_type) {
+        case FILE_UNREADABLE:
+            sprintf(msg, "%s does not exist or cannot be opened. %s", msg_arg, msg_pst);
+            break;
+        case FILE_UNWRITABLE:
+            sprintf(msg, "%s either cannot be created or cannot be written to. %s", msg_arg, msg_pst);
+            break;
+        case FILE_CORRUPT:
+            sprintf(msg, "%s is empty, corrupted or cannot be read. %s", msg_arg, msg_pst);
+            break;
+        case REFRESH_ERROR:
+            sprintf(msg, "Could not find entry %s: %s", msg_arg, msg_pst);
+            break;
+        default:
+            sprintf(msg, "%s", msg_pst);
+    }
+
+    if ( !(cntd_lg_flg && isEmptyStr(msg, 0, NULL)) ) 
+    {
+        scrWrn(NULL, msg, cntd_lg_flg);
+    }
+}
+
+void dbug(char* msg, int bMargin, const int scr_pause_flg) {
+    if (scrDbg(NULL, msg, 0, scr_pause_flg)) {
+        printScrVMargin(bMargin);
+    }
+}
+
+void sys_err(char* alt_level, char* msg_pst, const int cntd_lg_flg) 
+{
+    char msg[SCR_SIZE];
+
+    strcpy(msg, cntd_lg_flg? "":"An unexpected system error has occurred! ");
+    if(msg_pst)
+    strcat(msg, msg_pst);
+
+    if ( !(cntd_lg_flg && isEmptyStr(msg, 0, NULL)) ) 
+    {
+        scrErr(alt_level, msg, cntd_lg_flg);
+    }
+
     pauseScr (NULL, 0);
+}
+
+int promptID(const int edit_mode_flg) {
+    char pswd [PASSCODE_SZ + 1];
+
+    promptLgn("\nEnter login ID: ", pswd, PASSCODE_SZ);
+
+    if (edit_mode_flg && skpdtl(pswd))
+        return -1;
+    if (strlen(pswd) != PASSCODE_SZ)
+        return 0;
+
+    int loginID = atoi(pswd);
+    
+    return (PASSCODE_MN <= loginID && loginID <= PASSCODE_MX)? hash(loginID): 0;
+}
+
+int promptOptions(const char* msg, int* opt1, int* opt2) {
+    float val;
+    int result = promptOptVal(msg, opt1, &val, 1);
+
+    if (result > 0) {
+        *opt2 = val;
+    }
+    return result;
+}
+
+int promptOptVal(const char* msg, int* opt, float* val, const int opt_strict_flg) {  // when opt_strict_flg is true, val is treated like another opt
+    int   input_sz = ITEM_NO_SZ + GRADE_SZ + 1;
+    int   input_len, i;
+    char  input [input_sz];
+    char* inptr; 
+
+    promptLn(msg, input, input_sz);
+
+    trim(input, -1, NULL, 0);
+
+    if (!(input_len = strlen(input)))   // input is blank
+        return -1;
+
+    if ((*opt=atoi(input)) > 0 && ((i=strcspn(input, " ")) < input_len || (i=strcspn(input, "\t")) < input_len))  // extract values from input line
+    {
+        inptr = input + i + 1; 
+        if (opt_strict_flg) {
+            trim(inptr, input_len-i-1, NULL, 0);
+        }
+        return isDigitStr(inptr, 0, !opt_strict_flg) && ((*val = atof(inptr)) > 0 || !opt_strict_flg && isDigitStr(inptr, 1, !opt_strict_flg));
+    }
+    return 0;
+}
+
+FILE *reloadData(void *list, int *list_sz_ptr, const char *DATA_FNAME, const int read_only_flg) 
+{  // used to refresh data in public domain context
+    FILE* fptr = stageData(list, list_sz_ptr, DATA_FNAME, read_only_flg);  
+    if (!fptr) {
+        sys_err (read_only_flg? NULL: LVL_FATAL, read_only_flg? MSG_ACT_CONTD: MSG_ACT_ABORT, 0);
+    } 
+    return fptr;
+}
+
+FILE *refreshData(void *list, int *list_sz_ptr, const char *DATA_FNAME, const int read_only_flg, const int auth_mode_flg) 
+{  // used to refresh data in authenticated user context    
+    if (auth_mode_flg && loggedOut() || !auth_mode_flg && !CURRENT_USR) {
+        if (!auth_mode_flg) {
+            sys_err(LVL_FATAL, MSG_ACT_ABORT, 0);
+        }
+        return NULL;
+    }
+
+    int loginID = CURRENT_USR->loginID;
+    FILE* fptr  = reloadData(list, list_sz_ptr, DATA_FNAME, read_only_flg);
+
+    if (!(CURRENT_USR = userSearch(loginID, NULL)))  // current user refresh failure
+    {   
+        if (fptr && !read_only_flg) {
+            commitData(list, *list_sz_ptr, fptr);    // recommit previous data as reloading in write mode always clears the source file
+        }
+        if (auth_mode_flg) {
+            displayLogoutScreen(LGO_SESS_EXPIRED);
+        } else {
+            sys_err(LVL_FATAL, MSG_ACT_ABORT, 0);
+        }
+        return NULL;
+    }
+    return fptr;
+}
+
+int commitData(void *list, int list_sz, FILE *fptr) 
+{
+    if (!(list && persistData(list, list_sz, fptr))) {
+        sys_err (NULL, MSG_SAVE_ERROR, 0);
+        return 0;
+    }
+    return 1;
+}
+
+int submitEnrollData(Enrollment *enroll_buf, int enroll_cnt, const int auth_mode_flg, const int edit_subj_flg) 
+{
+    int  *list_sz_ptr = getDataListSz(LST_ENROLL);
+    void *list        = getDataList(LST_ENROLL);
+    char *dat_fn      = getDataFileName(LST_ENROLL);
+    FILE *fwptr;
+
+    if (enroll_cnt > 0 && (fwptr = refreshData(list, list_sz_ptr, dat_fn, 0, auth_mode_flg)))  // begin txn operation 
+    {
+        Enrollment *enroll, *e;
+        int edt_err_flg;
+
+        for (int i = 0; i < enroll_cnt; i++) 
+        {
+            e = enroll_buf + i;
+
+            if (edit_subj_flg) 
+            {
+                edt_err_flg = -1;
+            
+                for (int j = 0; j < *list_sz_ptr; j++) 
+                {
+                    enroll = list + j;
+                
+                    if (e->studentID == enroll->studentID && e->subjectID == enroll->subjectID) {
+                       *enroll = *e; edt_err_flg = 0;
+                        break;
+                    }
+                }
+                if (edt_err_flg) {
+                    char entry_key [12];
+                    strcpy(entry_key, e->studentID);
+                    strcat(entry_key, "+");
+                    strcat(entry_key, e->subjectID);
+                    warn(REFRESH_ERROR, entry_key, "The enrollment may have been altered from an external source.", 0);
+                }
+            }
+            else
+                registerEnrollment(e->studentID, e->subjectID, e->teacherID); printf("Reg stud %d subj %d teach %d\n", e->studentID, e->subjectID, e->teacherID);
+        }
+
+        return commitData(Enrollments, *list_sz_ptr, fwptr);  // end txn operation
+    }
+
+    return 0;
 }
 
 
@@ -842,13 +1089,26 @@ int main() {
     return 0;
 }
 
-void initSystem()       // Initialize system resources
+void initSystem()
 {
-    Students = calloc(0, USER_SZ);
-    Enrollments = calloc(0, ENROLL_SZ);
+    // configure log framework for application logging
+    SYS_LG_FILE = APP_LOG_FILENAME;  
+    SYS_LG_TITLE = APP_LOG_TITLE;
+    WARN_MODE = ERROR_MODE = LG_MODE_ALL;
+    DEBUG_MODE = APP_MODE;
+
+    if (initLogFile() < 0) {
+        warn(FILE_UNWRITABLE, APP_LOG_FILENAME, "Application file logging will not be performed.", 0);
+    }
+
+    // initialize system resources
+    studentCapacity = enrollCapacity = MEM_EXT_SZ;
+    Students = calloc(studentCapacity, USER_SZ);
+    Enrollments = calloc(enrollCapacity, ENROLL_SZ);
 
     if (!Students || !Enrollments) {
-        sys_err(LVL_FATAL, "One or more critical system components could not be initialized.\n\nThe application will now exit...");
+        sys_err(LVL_FATAL, "One or more critical system components could not be initialized. ", 0);
+        info(2, 1, "The application will now exit...", 1);
         exit(1);
     }
 }
@@ -927,17 +1187,17 @@ void *loadEntryData(void *list, int *list_sz_ptr, const char *data_fname)
         fclose(fptr);
 
         if (!ptr) {
-            warn(FILE_CORRUPT, data_fname, "\n");
+            warn(FILE_CORRUPT, data_fname, NULL, 0);
         }
     } 
     else 
     {
-        warn(FILE_UNREADABLE, data_fname, "(Resetting to default state...");  
+        warn(FILE_UNREADABLE, data_fname, "(Resetting to default state...", 0);  
 
         if ((fptr = fopen(data_fname, "w")) && persistData(list, *list_sz_ptr, fptr)) {
-            printf("Success)\n");
+            warn(NULL, NULL, "Success)", 1);
         } else {
-            printf("Fail)\n");
+            warn(NULL, NULL, "Fail)", 1);
         }
     }
 
@@ -955,49 +1215,7 @@ void loadSchoolData() {
     ptr = loadEntryData(Enrollments, &enrollCapacity, ENROLL_DATA_FILENAME) && ptr;
 
     if (!ptr) {
-        pauseScr (NULL, 1);
-    }
-}
-
-FILE *reloadData(void *list, int *list_sz_ptr, const char *DATA_FNAME, const int read_only_flg) 
-{  // used to refresh data in public domain context
-    FILE* fptr = stageData(list, list_sz_ptr, DATA_FNAME, read_only_flg);  
-    if (!fptr) {  // data refresh failure
-        sys_err (read_only_flg? NULL: LVL_FATAL, read_only_flg? MSG_ACTION_CONTD: MSG_ACTION_ABORT);
-    } 
-    return fptr;
-}
-
-FILE *refreshData(void *list, int *list_sz_ptr, const char *DATA_FNAME, const int read_only_flg, const int auth_mode_flg) 
-{  // used to refresh data in authenticated user context    
-    if (auth_mode_flg && loggedOut() || !auth_mode_flg && !CURRENT_USR) {
-        if (!auth_mode_flg) {
-            sys_err(LVL_FATAL, MSG_ACTION_ABORT);
-        }
-        return NULL;
-    }
-
-    int loginID = CURRENT_USR->loginID;
-    FILE* fptr  = reloadData(list, list_sz_ptr, DATA_FNAME, read_only_flg);
-
-    if (!(CURRENT_USR = userSearch(loginID, NULL)))  // current user refresh failure
-    {   
-        if (fptr && !read_only_flg) {
-            commitData(list, list_sz_ptr, fptr);    // recommit previous data as reloading in write mode always clears the source file
-        }
-        if (auth_mode_flg) {
-            displayLogoutScreen(LGO_SESS_EXPIRED);
-        } else {
-            sys_err(LVL_FATAL, MSG_ACTION_ABORT);
-        }
-        return NULL;
-    }
-    return fptr;
-}
-
-void commitData(void *list, int list_sz, FILE *fptr) {
-    if (!(list && persistData(list, list_sz, fptr))) {
-        sys_err (NULL, MSG_SAVE_ERROR);
+        pauseScr ("\n", 1);
     }
 }
 
@@ -1128,7 +1346,7 @@ void mainscreen() {
             break;
 
             case 0:
-            printf ("Exiting the program....\n");
+            info(0, 1, "Exiting the program....", 0);
             exit(0);
 
             default:
@@ -1164,43 +1382,54 @@ void studentMenuScreen() {
             break;
 
             case 2:
-            studentRegScreen();
+            CURRENT_USR = NULL;
+            studentRegistration();
             break;
 
             case 0:
             return; // to mainscreen
 
             default:
-            pauseScr ("INVALID REQUEST. PLEASE TRY AGAIN", 1);
+            pauseScr ("Invalid input. Please enter a valid option.", 1);
         }
 
     } while (1);
 }
 
-void studentRegScreen() 
+void studentRegistration() 
 {
     int reg_chkpnt = CURRENT_USR ? CURRENT_USR->reg_stat : -1;
 
-    displayScreenSubHdr(getTitle(reg_chkpnt < 0 ? NULL: "CONTINUE ", USR_STUDENT, " REGISTRATION"));
-
     if (reg_chkpnt <= REG_STAT_PROF) {
-        if (!registerUserProfile(USR_STUDENT, reg_chkpnt, 0))
+        if (!userProfileRegScreen(USR_STUDENT, reg_chkpnt))
             return;
     }
     if (CURRENT_USR && reg_chkpnt <= REG_STAT_SUBJ) {
-        subjectRegScreen(CURRENT_USR->loginID, reg_chkpnt > 0 ? 0: reg_chkpnt);
+        subjectRegScreen(CURRENT_USR->loginID, reg_chkpnt);
     }
 }
 
-int registerUserProfile(int usr_type, int reg_chkpnt, const int edit_mode_flg) {
+void displayProfRegScreen(int usr_type, int reg_chkpnt, const int edit_mode_flg) {
 
-    printf ("Please provide your profile information below (press ENTER to skip optional details)\n");
+    displayScreenSubHdr(getTitle(reg_chkpnt < 0 ? NULL: edit_mode_flg ? "EDIT ":"CONTINUE ", usr_type, " REGISTRATION"));
+
+    if (edit_mode_flg) { displayProfileScreen(NULL, NULL); }
+
+    printf ("\nPlease provide your profile information below (press ENTER to skip optional details)\n");
+}
+
+int userProfileRegScreen(int usr_type, int reg_chkpnt) {
+
+    const int edit_mode_flg = reg_chkpnt == REG_STAT_FULL;
 
     if (edit_mode_flg || reg_chkpnt < REG_STAT_PROF) 
     {
-        if (!processUserAccount(usr_type, edit_mode_flg)) {
+        if (!processUserAccount(usr_type, reg_chkpnt, edit_mode_flg)) {
             return 0;
         }
+    }
+    else {
+        displayProfRegScreen(usr_type, reg_chkpnt, edit_mode_flg);
     }
 
     if (CURRENT_USR && (edit_mode_flg || reg_chkpnt <= REG_STAT_PROF))
@@ -1219,29 +1448,41 @@ int registerUserProfile(int usr_type, int reg_chkpnt, const int edit_mode_flg) {
         FILE* fwptr  = refreshData(list, list_sz_ptr, dat_fn, 0, edit_mode_flg);  // begin txn operation   
         if (fwptr) 
         {
-            *CURRENT_USR = usr_cpy;
-            CURRENT_USR -> reg_stat = REG_STAT_SUBJ;
-            commitData(list, *list_sz_ptr, fwptr);  // end txn operation
+           *CURRENT_USR = usr_cpy;
 
-            char msg[32];
-            sprintf(msg, "\nProfile %s successfully.\n", edit_mode_flg? "updated":"created");
-            pauseScr(msg, 1);
+            if (!edit_mode_flg) {
+                CURRENT_USR -> reg_stat = REG_STAT_SUBJ;
+            }
+            if (commitData(list, *list_sz_ptr, fwptr))  // end txn operation
+            {  
+                char msg[32];
+                sprintf(msg, "Profile %s successfully.", edit_mode_flg? "updated":"created");
+
+                info(1, 1, msg, 0);
+                pauseScr(NULL, 1);
+            }
         }
     }
 
     return 1;
 }
 
-int processUserAccount(int usr_type, const int edit_mode_flg) 
+int processUserAccount(int usr_type, const int reg_chkpnt, const int edit_mode_flg) 
 {
-    int   loginID, id_ok;
+    int   loginID, id_ok, result;
     int*  list_sz_ptr = getDataListSz(usr_type);
     void* list        = getDataList(usr_type);
     char* dat_fn      = getDataFileName(usr_type);
-    FILE* fwptr;
+    FILE* fptr;
     User* usr;
 
+    if (edit_mode_flg && !refreshData(list, list_sz_ptr, dat_fn, 1, edit_mode_flg)) {
+        return 0;
+    }
+
     do {
+        displayProfRegScreen(usr_type, reg_chkpnt, edit_mode_flg);
+
         loginID = promptID(edit_mode_flg);
 
         if (loginID < 0) {  
@@ -1249,13 +1490,13 @@ int processUserAccount(int usr_type, const int edit_mode_flg)
         }
 
         if (loginID > 0) {   
-                                 // begin txn operation
+                                    // begin txn operation
             if (edit_mode_flg) {  
-                fwptr = refreshData(list, list_sz_ptr, dat_fn, 0, edit_mode_flg); 
+                fptr = refreshData(list, list_sz_ptr, dat_fn, 1, edit_mode_flg); 
             } else {
-                fwptr = reloadData(list, list_sz_ptr, dat_fn, 0);
+                fptr = reloadData(list, list_sz_ptr, dat_fn, 0);
             }
-            if (!fwptr) return;  // abort txn operation
+            if (!fptr) return 0;  // abort txn operation
 
             usr = getUser(loginID, list, *list_sz_ptr);
 
@@ -1264,26 +1505,25 @@ int processUserAccount(int usr_type, const int edit_mode_flg)
             if (id_ok)
             {
                 if (edit_mode_flg) {
-                    CURRENT_USR->loginID = loginID;  
+                    CURRENT_USR->loginID = loginID; 
+                    result = 1; 
                 } else {
                     CURRENT_USR = registerUser(loginID, usr_type);
                 }
             }
-
-            commitData (getDataList(usr_type), *list_sz_ptr, fwptr);  // end txn operation
-            
-            if (id_ok) 
-            {
-                return 1;
+            if (!edit_mode_flg) {
+                result = commitData(getDataList(usr_type), *list_sz_ptr, fptr);  // end txn operation
+            }
+            if (id_ok) {
+                return result;
             }
         }
 
         printf("\nThe login ID entered is either already taken or invalid. Please provide a different ID between %d and %d.\n", PASSCODE_MN, PASSCODE_MX);
 
-        if (retry(0))
-            displayScreenSubHdr (getTitle(NULL, USR_STUDENT, " REGISTRATION"));
-        else 
+        if (!retry(0)) {
             return 0;
+        }
 
     } while (1);
 }
@@ -1297,9 +1537,7 @@ void processUserName(User* usr, const int edit_mode_flg) {
         if (edit_mode_flg && skpdtl(fn))
             break;
 
-        trim(fn, -1, fn, 0);
-
-        if (strlen(fn) > 0) {
+        if (!isEmptyStr(fn, 1, fn)) {
             strcpy(usr->Fname, fn);
             break;
         }
@@ -1375,61 +1613,77 @@ void processUserTimeout(User* usr, const int edit_mode_flg) {
     } while (1);
 }
 
-void subjectRegScreen(int loginID, int reg_mode_flg)  // NOTE: subject registration specifically for students
+void subjectRegScreen(int loginID, const int actn_mode)  // NOTE: subject registration specifically for students
 {
-    const int ITEM_SZ    = ITEM_NO_SZ   + SCR_PADDING;
-    const int SUBJ_SZ    = SUBJ_NAME_SZ + SCR_PADDING;
-    const int NAME_SZ    = FULL_NAME_SZ;
+    const int ITEM_SZ   = ITEM_NO_SZ   + SCR_PADDING;
+    const int SUBJ_SZ   = SUBJ_NAME_SZ + SCR_PADDING;
+    const int NAME_SZ   = FULL_NAME_SZ + SCR_PADDING;
 
-    int   fst_run_flg    = 1; 
-    int   edit_mode_flg  = reg_mode_flg < 0? 0: reg_mode_flg;
-    int   tbl_margin;
+    const int edit_mode_flg = actn_mode >= REG_STAT_FULL;
+    const int edit_subj_flg = actn_mode == SUBJ_ACT_EDIT;
 
-    int  *list_sz_ptr   = &enrollCapacity;
-    void *list          = Enrollments;
-    char *dat_fn        = ENROLL_DATA_FILENAME;
+    int   fst_run_flg   = 1; 
+    int   tbl_margin, result, subj_no, subj_id, tchr_no, tchr_id;
 
-    int   enroll_cnt    = 0, subj_total; 
-    int   subjects        [SUBJECTS_SZ];  // refers to indices of available subjects, i.e. subjects not already enrolled in by student
-    Enrollment enroll_buf [SUBJECTS_SZ];
+    int  *list_sz_ptr  = getDataListSz(LST_ENROLL);
+    void *list         = getDataList(LST_ENROLL);
+    char *dat_fn       = getDataFileName(LST_ENROLL);
 
-    int   input_sz      = ITEM_NO_SZ * 2 + 2;
-    int   input_len, subj_no, tchr_no, i,  j;
-    char  input [input_sz];
-    char* inptr; 
+    int   enroll_cnt   = 0, subj_total; 
+    int   subjects         [SUBJECTS_SZ];  // refers to indices of available subjects, i.e. subjects not already enrolled in by student
+    Enrollment enroll_buf  [SUBJECTS_SZ];  // refers to newly created enrollment entries based on user selection
+    Enrollment*enrolls_ptr [SUBJECTS_SZ];  // refers to already created enrollment entries belonging to the user
+    Enrollment*enroll;
     
 top:    
-    displayScreenSubHdr(getTitle(reg_mode_flg < 0 ? NULL: "CONTINUE ", LST_SUBJECT, " REGISTRATION"));
+    displayScreenSubHdr(getTitle(actn_mode < 0 ? NULL: edit_mode_flg ? "EDIT ":"CONTINUE ", LST_SUBJECT, " REGISTRATION"));
     
-    tbl_margin = print3ColTblHdr("No.", ITEM_SZ, "Subject", SUBJ_SZ, "Teacher", NAME_SZ);
+    tbl_margin = print4ColTblHdr("No.", ITEM_SZ, "Subject", SUBJ_SZ, "No.", ITEM_SZ, "Teacher", NAME_SZ);
 
     if (fst_run_flg && !refreshData(list, list_sz_ptr, dat_fn, 1, edit_mode_flg))
         return;
 
-    if (fst_run_flg) {  // filter for subjects not yet enrolled by student  
-        subj_total = getAvlSubjects(loginID, USR_STUDENT, subjects);
+    if (fst_run_flg)
+    {   
+        if (edit_subj_flg)
+            subj_total = enrollSearch(loginID, USR_STUDENT, NULL, 0, enrolls_ptr, SUBJECTS_SZ);  // filter for subjects aleady enrolled by student 
+        else
+            subj_total = getAvlSubjects(loginID, USR_STUDENT, subjects);  // filter for subjects not yet enrolled by student 
     }
 
     // populate table with subject & teacher listings
     if (subj_total == 0) 
         printScrTitle(NULL, "No items available\n\n", NULL);
     else
-    for (i=0, j=0; i < subj_total || j < TEACHERS_SZ; i++, j++) {
+    for (int i = 0; i < subj_total || i < TEACHERS_SZ; i++) {
+        
         printScrHMargin(tbl_margin); 
-        printScrColVal(i + 1, ITEM_SZ, 0, NULL);      
-        printScrColText(i >= subj_total ? "" : SUBJECTS[subjects[i]], SUBJ_SZ, NULL);
-        printScrColText(j >= TEACHERS_SZ ? "" : getFullName(TEACHERS+j), NAME_SZ, "\n");
+
+        if (i < subj_total) {
+            printScrColVal(i + 1, ITEM_SZ, 0, NULL);      
+            printScrColText(SUBJECTS[edit_subj_flg? enrolls_ptr[i]->subjectID - 1 :subjects[i]], SUBJ_SZ, NULL);
+        } else {
+            printScrColText("", ITEM_SZ + SUBJ_SZ, NULL);
+        }
+
+        if (i < TEACHERS_SZ) {
+            printScrColVal(i + 1, ITEM_SZ, 0, NULL);
+            printScrColText(getFullName(TEACHERS+i), NAME_SZ, "\n");
+        } else {
+            printScrColText("", ITEM_SZ + SUBJ_SZ, NULL);
+        }
     }
  
     // prompt for and process enrollment input
-    printf ("\n\nPlease provide your course information below (press ENTER when finished)\n\n");
+    printf ("\n\nPlease provide your course information below (press ENTER when finished)\n");
+    printf ("\n(Specify any pair of numbers associated with a subject and teacher from the list.");
+    printf ("\n Note that a subject can only be paired with a single teacher, however the same");
+    printf ("\n teacher may be paired with multiple subjects.)\n\n");
 
     do {
-        promptLn("Enter course info ([subject no.] [teacher no.]): ", input, input_sz);
+        result = promptOptions("Enter course info (Subject No. Teacher No.): ", &subj_no, &tchr_no);
 
-        trim(input, -1, NULL, 0);
-
-        if (!(input_len = strlen(input)))  // input is blank
+        if (result < 0)  // input is blank
         {
             if (retry(RT_CONFIRM)) { 
                 fst_run_flg = 0;
@@ -1437,49 +1691,43 @@ top:
             } 
             else break;
         }
-        else  // extract values from input line
+        else if (result)
         {  
-            if ((subj_no=atoi(input)) > 0 && ((i=strcspn(input, " ")) < input_len || (i=strcspn(input, "\t")) < input_len)) 
-            {
-                inptr = input + i + 1; 
-                trim(inptr, input_len-i-1, NULL, 0);
-
-                if (isDigitStr(inptr) && (tchr_no = atoi(inptr)) > 0) 
-                {
-                    if (subj_no > subj_total || getEnrollment(subj_no, NULL, enroll_buf, enroll_cnt)) {
-                        printf("The entered subject no. is incorrect or already added. Please specify a valid subject no. from the list above.\n");
-                    } else if (tchr_no > TEACHERS_SZ) {
-                        printf("The entered teacher no. is incorrect. Please specify a teacher no. from the list above.\n");
-                    } else {  // buffer specified course info as new enrollment
-                        Enrollment new_enroll = {loginID, edit_mode_flg? subjects[subj_no-1] + 1 :subj_no, TEACHERS[tchr_no-1].loginID};
-                        enroll_buf [enroll_cnt++] = new_enroll;
-
-                        if (enroll_cnt == subj_total)
-                            break;
-                    }
-
-                    continue;
-                }
+            if (subj_no > subj_total) {
+                printf("The entered subject no. is incorrect. Please specify a valid subject no. from the list above.\n");
+                continue;
             } 
+            else if (tchr_no > TEACHERS_SZ) {
+                printf("The entered teacher no. is incorrect. Please specify a teacher no. from the list above.\n");
+                continue;
+            }
+            
+            subj_id = edit_subj_flg ? enrolls_ptr[subj_no-1]->subjectID : subjects[subj_no-1] + 1;
+            tchr_id = TEACHERS[tchr_no-1].loginID;
 
-            printf("The entered course information is invalid. Please specify enrollment options according to the syntax given.\n");
+            if (enroll = getEnrollment(subj_id, NULL, enroll_buf, enroll_cnt)) {  // re-edit already edited enrollment entry
+                enroll->teacherID = tchr_id;
+            }
+            else if (edit_subj_flg) {  // clone existing enrollment and update with specified course info
+
+                Enrollment enroll_cpy = *getEnrollment(subj_id, NULL, enrolls_ptr, subj_total);
+                enroll_cpy.teacherID = tchr_id;
+                enroll_buf [enroll_cnt++] = enroll_cpy;
+            } 
+            else {  // buffer specified course info as new enrollment
+
+                Enrollment new_enroll = {loginID, subj_id, tchr_id};
+                enroll_buf [enroll_cnt++] = new_enroll;
+            } 
         }
+        else 
+            printf("The entered course information is invalid. Please specify enrollment options according to the syntax given.\n"); 
+
     } while (1);
 
     // save selected enrollments
-    FILE* fwptr;
-    Enrollment* e;
-    
-    if (enroll_cnt > 0 && (fwptr = refreshData(list, list_sz_ptr, dat_fn, 0, edit_mode_flg)))  // begin txn operation 
-    {
-        for (j = 0; j < enroll_cnt; j++) {
-            e = enroll_buf + j;
-            registerEnrollment(e->studentID, e->subjectID, e->teacherID);
-        }
-        commitData(Enrollments, *list_sz_ptr, fwptr);  // end txn operation
-    }
-
-    else return;
+    if (!submitEnrollData(enroll_buf, enroll_cnt, edit_mode_flg, edit_subj_flg)) 
+        return;
 
     // update registration status for new students only
     if (!edit_mode_flg) 
@@ -1487,33 +1735,22 @@ top:
         list        = getDataList(USR_STUDENT);
         list_sz_ptr = getDataListSz(USR_STUDENT);
         dat_fn      = getDataFileName(USR_STUDENT);
+        FILE* fwptr;
 
-        if (fwptr = refreshData(list, list_sz_ptr, dat_fn, 0, edit_mode_flg))  // begin txn operation 
+        if (fwptr = refreshData(list, list_sz_ptr, dat_fn, 0, 0))  // begin txn operation 
         {
             CURRENT_USR->reg_stat = REG_STAT_FULL;
-            commitData(list, *list_sz_ptr, fwptr);  // end txn operation
+            if (!commitData(list, *list_sz_ptr, fwptr))  // end txn operation
+                return;
         } 
         else return;
     }
 
     char msg[45];
-    sprintf(msg, "\nCourse information %s successfully.\n", edit_mode_flg? "updated":"created");
-    pauseScr(msg, 1);
-}
+    sprintf(msg, "Course information %s successfully.", edit_mode_flg? "updated":"created");
 
-int promptID(const int edit_mode_flg) {
-    char pswd [PASSCODE_SZ + 1];
-
-    promptLgn("\nEnter login ID: ", &pswd, PASSCODE_SZ);
-
-    if (edit_mode_flg && skpdtl(pswd))
-        return -1;
-    if (strlen(pswd) != PASSCODE_SZ)
-        return 0;
-
-    int loginID = atoi(pswd);
-    
-    return (PASSCODE_MN <= loginID && loginID <= PASSCODE_MX)? hash(loginID): 0;
+    info(1, 1, msg, 0);
+    pauseScr(NULL, 1);
 }
 
 void loginScreen() {
@@ -1528,23 +1765,27 @@ void loginScreen() {
 
         loginID = promptID(0);
 
-        if (!reloadData(list, list_sz_ptr, dat_fn, 1)) {
-            pauseScr("\n\nLogin failed! Please contact system administrator.", 1);
-            return;
-        }  
-
         reg_err_flg = 0;
 
-        if (CURRENT_USR = getUser(loginID, list, *list_sz_ptr)) {
-            if (CURRENT_USR->reg_stat == REG_STAT_FULL) {
-                userHomeScreen();
+        if (loginID > 0) {
+
+            if (!reloadData(list, list_sz_ptr, dat_fn, 1)) {
+                info(2, 0, "Login failed! Please contact the system administrator.", 0);
+                pauseScr(NULL, 1);
                 return;
+            }  
+
+            if (CURRENT_USR = getUser(loginID, list, *list_sz_ptr)) {
+                if (CURRENT_USR->reg_stat == REG_STAT_FULL) {
+                    userHomeScreen();
+                    return;
+                }
+                if (CURRENT_USR_TYPE == USR_STUDENT) {
+                    studentRegistration();
+                    return;
+                }
+                reg_err_flg = -1;
             }
-            if (CURRENT_USR_TYPE == USR_STUDENT) {
-                studentRegScreen();
-                return;
-            }
-            reg_err_flg = -1;
         }
 
         if (reg_err_flg) {
@@ -1606,36 +1847,36 @@ void userHomeScreen(){
             return;
 
             case 1:
-            userProfileScreen(CURRENT_USR, NULL, 0);
+            viewProfileScreen(NULL, NULL);
             continue;
 
             case 2:
-            userProfileScreen(CURRENT_USR, NULL, 1);
+            userProfileRegScreen(NULL, REG_STAT_FULL);
             continue;
         }
 
         if (CURRENT_USR_TYPE == USR_STUDENT) {
             switch (choice) {
                 case 3:
-                subjectListScreen();
+                subjectListScreen(0);
                 continue;
 
                 case 4:
-                subjectRegScreen(CURRENT_USR->loginID, 1);
+                subjectRegScreen(CURRENT_USR->loginID, SUBJ_ACT_ADD);
                 continue;
 
                 case 5:
-                
+                subjectListScreen(1);
                 continue;
             }
         } else if (CURRENT_USR_TYPE == USR_TEACHER) {
             switch (choice) {
                 case 3:
-                studentListScreen(0);
+                subjectListScreen(0);
                 continue;
 
                 case 4:
-                studentListScreen(1);
+                subjectListScreen(1);
                 continue;
             }
         } else if (CURRENT_USR_TYPE == USR_PRINCIPAL) {
@@ -1667,15 +1908,15 @@ void userHomeScreen(){
     } while (1);
 }
 
-void userProfileScreen(User* usr, int usr_type, const int edit_mode_flg) {
-    const int MAX_COL_SZ = 18 + SCR_PADDING;  //max size for the field names column
+void displayProfileScreen(User* usr, int usr_type) 
+{
+    const int MAX_COL_SZ = 20 + SCR_PADDING;  //max size for the field names column
     
     int hmargin = 8, len;
     float avg;
 
-    int*  list_sz_ptr = getDataListSz(NULL);
-    void* list        = getDataList(NULL);
-    char* dat_fn      = getDataFileName(NULL);
+    if (!usr) usr = CURRENT_USR;
+    if (usr_type <= 0) usr_type = CURRENT_USR_TYPE;
 
     if ((len = strlen(usr->Fname)) > hmargin)
         hmargin = len;
@@ -1686,18 +1927,11 @@ void userProfileScreen(User* usr, int usr_type, const int edit_mode_flg) {
 
     hmargin = (SCR_SIZE - MAX_COL_SZ - hmargin) / 2;
 
-    if (usr_type <= 0) usr_type = CURRENT_USR_TYPE;
-
-    displayScreenSubHdr(getTitle(NULL, usr_type, " PROFILE"));
-
-    if (!refreshData(list, list_sz_ptr, dat_fn, 1, 1))
-        return;
-
     printScrTitle(NULL, "----- PERSONAL INFORMATION -----", "\n\n");
 
     printScrHMargin(hmargin);
     printScrColText("First Name:", MAX_COL_SZ, NULL);
-    printScrColText(usr->Fname, 0, "\n");
+    printScrColText(vsan(usr->Fname), 0, "\n");
     printScrHMargin(hmargin);
     printScrColText("Last Name:", MAX_COL_SZ, NULL);
     printScrColText(vsan(usr->Lname), 0, "\n");
@@ -1706,14 +1940,14 @@ void userProfileScreen(User* usr, int usr_type, const int edit_mode_flg) {
     printScrColText(vsan(usr->Addr), 0, "\n");
     printScrHMargin(hmargin);
     printScrColText("Date of Birth:", MAX_COL_SZ, NULL);
-    printScrColText(usr->Dob, 0, "\n");
+    printScrColText(vsan(usr->Dob), 0, "\n");
     printScrHMargin(hmargin);
     printScrColText("Age:", MAX_COL_SZ, NULL);
     printScrColVal(calculateAge(NULL, usr->Dob), 0, 0, "\n\n");
 
     printScrTitle(NULL, "----- COURSE INFORMATION -----", "\n\n");
 
-    avg = calculateGradeAvg(usr_type==USR_PRINCIPAL? NULL: usr->loginID);
+    avg = calculateGradeAvg(usr_type==USR_PRINCIPAL? NULL: usr->loginID, usr_type);
 
     if (usr_type == USR_STUDENT) 
     {
@@ -1725,10 +1959,7 @@ void userProfileScreen(User* usr, int usr_type, const int edit_mode_flg) {
         printScrColVal(calculateTally(usr->loginID, usr_type, USR_TEACHER), 0, 0, "\n");  
         printScrHMargin(hmargin);
         printScrColText("Average Grade:", MAX_COL_SZ, NULL);
-        if(avg < 0)
-        printScrColText(UNSPEC_DATA, 0, "\n\n");   
-        else 
-        printScrColVal(avg, 0, 0, "%%\n\n"); 
+        printGrade(avg, "\n\n");
     }
     else if (usr_type == USR_TEACHER) 
     {
@@ -1739,11 +1970,8 @@ void userProfileScreen(User* usr, int usr_type, const int edit_mode_flg) {
         printScrColText("Total Subjects:", MAX_COL_SZ, NULL);
         printScrColVal(calculateTally(usr->loginID, usr_type, NULL), 0, 0, "\n");
         printScrHMargin(hmargin);
-        printScrColText("Student Avg Grade:", MAX_COL_SZ, NULL);
-        if(avg < 0)
-        printScrColText(UNSPEC_DATA, 0, "\n\n");   
-        else 
-        printScrColVal(avg, 0, 0, "%%\n\n"); 
+        printScrColText("Students Avg Grade:", MAX_COL_SZ, NULL);
+        printGrade(avg, "\n\n");
     }
     else if (usr_type == USR_PRINCIPAL) 
     {
@@ -1755,145 +1983,110 @@ void userProfileScreen(User* usr, int usr_type, const int edit_mode_flg) {
         printScrColVal(TEACHERS_SZ, 0, 0, "\n");
         printScrHMargin(hmargin);
         printScrColText("Total Students:", MAX_COL_SZ, NULL);
-        printScrColVal(getListEntryCnt(getDataList(usr_type), getDataListSz(usr_type)), 0, 0, "\n");
+        printScrColVal(getListEntryCnt(getDataList(usr_type), *getDataListSz(usr_type)), 0, 0, "\n");
         printScrHMargin(hmargin);
-        printScrColText("Student Avg Grade:", MAX_COL_SZ, NULL);
-        if(avg < 0)
-        printScrColText(UNSPEC_DATA, 0, "\n\n");   
-        else 
-        printScrColVal(avg, 0, 0, "%%\n\n"); 
+        printScrColText("School Avg Grade:", MAX_COL_SZ, NULL);
+        printGrade(avg, "\n\n");
     }
 
     printScrTitle(NULL, "----- ACCOUNT INFORMATION -----", "\n\n");
 
+    if (CURRENT_USR_TYPE == USR_PRINCIPAL && usr_type != USR_PRINCIPAL) {
+    printScrHMargin(hmargin);
+    printScrColText("Registration Status:", MAX_COL_SZ, NULL);
+    printScrColText(getRegStatDesc(usr->reg_stat, 0), 0, "\n");
+    }
     printScrHMargin(hmargin);
     printScrColText("Session Duration:", MAX_COL_SZ, NULL);
     printScrColVal(usr->timeout, 0, 0, " minutes(s)\n\n");
+}
 
+void viewProfileScreen(User* usr, int usr_type) 
+{
+    int*  list_sz_ptr = getDataListSz(usr_type);
+    void* list        = getDataList(usr_type);
+    char* dat_fn      = getDataFileName(usr_type);
 
-    if (edit_mode_flg) {
-        registerUserProfile(usr_type, CURRENT_USR->reg_stat, edit_mode_flg);
-    } else {
-        pauseScr (NULL, 1);
-    }
+    if (!(refreshData(list, list_sz_ptr, dat_fn, 1, 1) || CURRENT_USR))
+        return;
 
-    if (CURRENT_USR_TYPE == USR_PRINCIPAL)
-        switch (usr_type) {
-            case USR_STUDENT:
-            enrollmentListScreen();
-            break;
-            
-            case USR_TEACHER:
-            break;
-            
-            default:
-            userHomeScreen();
-        }
+    displayScreenSubHdr(getTitle(NULL, usr_type, " PROFILE"));
+
+    displayProfileScreen(usr, usr_type);
+
+    pauseScr("\n", 1);
+}
+
+void displaySubjListScreen(User* usr, int usr_type) 
+{
+    const int ITEM_SZ   = ITEM_NO_SZ   + SCR_PADDING;
+    const int NAME_SZ   = FULL_NAME_SZ + SCR_PADDING;
+    const int SUBJ_SZ   = SUBJ_NAME_SZ + SCR_PADDING;
+
+    int subj_total, uID; 
+    char* name;
+    Enrollment* e;
+    Enrollment* enrolls_ptr [SUBJECTS_SZ];  // subject enrollment entries belonging to the given user
+
+    if (!usr) usr = CURRENT_USR;
+    if (usr_type <= 0) usr_type = CURRENT_USR_TYPE;
+
+    int  utype       = usr_type==USR_TEACHER ? USR_STUDENT : USR_TEACHER;
+    int *list_sz_ptr = getDataListSz(utype);
+    User*list        = getDataList(utype);
+
+    int tbl_margin = print4ColTblHdr("No.", ITEM_SZ, usr_type==USR_TEACHER?"Student":"Teacher", NAME_SZ, "Subject", SUBJ_SZ, "Grade", GRADE_SZ);
+
+    subj_total = enrollSearch(usr->loginID, usr_type, NULL, 0, enrolls_ptr, SUBJECTS_SZ);
+
+    // populate table with subject & teacher listings
+    if (subj_total == 0) 
+        printScrTitle(NULL, "No items available\n\n", NULL);
     else
-        userHomeScreen();
-}
+    for (int i = 0; i < subj_total; i++) {
+        e = enrolls_ptr[i];
+        uID = usr_type==USR_TEACHER? e->studentID : e->teacherID;
+        name = getFullName(getUser(uID, list, *list_sz_ptr));
 
-void displayUserListHdr() {
-    char col_hdr1[50], col_hdr3[50];
-
-    switch (CURRENT_USR_TYPE) {
-        case USR_STUDENT:
-            strcpy(col_hdr1, "Teacher");
-            strcpy(col_hdr3, "Grade");
-            break;
-        case USR_TEACHER:
-            strcpy(col_hdr1, "Student");
-            strcpy(col_hdr3, "Grade");
-            break;
-        case USR_PRINCIPAL:
-            strcpy(col_hdr1, "Student");
-            strcpy(col_hdr3, "Teacher");
-            break;       
+        printScrHMargin(tbl_margin); 
+        printScrColVal(i + 1, ITEM_SZ, 0, NULL);     
+        printScrColText(name? name: "", NAME_SZ, NULL); 
+        printScrColText(SUBJECTS[e->subjectID-1], SUBJ_SZ, NULL);
+        printGrade(e->grade, "\n");
     }
 
-    printf ("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -\n\n");
-    printf ("     %-50s Subject %30s\n\n",                                                     col_hdr1, col_hdr3);
-    printf ("- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -\n\n");
+    printScrVMargin(2);
 }
 
-void subjectListScreen() {
+void subjectListScreen(const int edit_mode_flg) 
+{
+    int*  list_sz_ptr = getDataListSz(NULL);
+    void* list        = getDataList(NULL);
+    char* dat_fn      = getDataFileName(NULL);
 
-    displayUserListHdr();
+    if (!refreshData(list, list_sz_ptr, dat_fn, 1, 1) && (edit_mode_flg || !CURRENT_USR))
+        return;
 
-    pauseScr (NULL, 1);
+    displayScreenSubHdr(getTitle(NULL, NULL, " SUBJECTS"));
 
-    userHomeScreen();
+    displaySubjListScreen(NULL, NULL);
+
+    if (!edit_mode_flg) {
+        pauseScr (NULL, 1);
+        return;
+    }
+    
+    if (CURRENT_USR_TYPE == USR_TEACHER) 
+    {
+
+    } 
+    else 
+    {
+
+    }
 }
 
-void studentListScreen(const int edit_mode_flg) {
-    do {
-        displayUserListHdr();
-
-        if (edit_mode_flg) {
-
-        } else {
-            pauseScr (NULL, 1);
-            break;
-        }
-    } while(1);
-
-    userHomeScreen();
-}
 
 void enrollmentListScreen(const int edit_mode_flg) {
-    do {
-        displayUserListHdr();
 
-        if (edit_mode_flg) {
-
-        } else {
-            pauseScr (NULL, 1);
-            break;
-        }
-    } while(1);
-
-    if (edit_mode_flg) {
-
-    } else {
-    
-    }
-    userHomeScreen();
 }
-
-
-/*
-
-void processInmateCrime() {
-    int randomYears1, randomYears2;
-    int choice = 0;
-    
-    srand(time(NULL));  //initialize and seed random number generator using the current time
-    
-    do {
-        
-        clearScr();
-        printf("\nChoose a crime from the following list:\n");
-    
-        for (int i = 0; i < CRIME_LIST_SZ; i++) {
-            printf("[%d] %s\n", i + 1, CRIME_LIST[i]);
-        }
-    
-        // Allow the user to choose only 1 crime
-        promptInt("\nEnter the number corresponding to the crime: ", &choice, 2);
-        
-        if (1 <= choice && choice <= CRIME_LIST_SZ) {
-            break;
-        }
-        
-        pauseScr("\nInvalid input. Please enter a valid option.", 1);
-        
-    } while(1);
-    
-    strcpy(Data.CriSLO, CRIME_LIST [choice - 1]);
-        
-    randomYears1 = rand() % 100 + 1;
-    randomYears2 = rand() % 100 + 1;
-    
-    Data.SenS = (float) randomYears2 / randomYears1;
-}
-}*/

@@ -16,10 +16,14 @@
 #define LVL_FATAL "FATAL: "
 #define LVL_DEBUG "DEBUG: "
 
-// Log message type enumeration
-#define FILE_UNREADABLE 1
-#define FILE_CORRUPT 2
-#define SYS_ERROR 3
+// Debug log mode enumeration
+#define LG_MODE_OFF   0
+#define LG_MODE_CONSL 1
+#define LG_MODE_FILE  2
+#define LG_MODE_ALL   3
+
+// Log file default title
+#define DEF_LG_TITLE "System Application Log"
 
 // Trim mode enumeration
 #define LTRIM -1
@@ -34,10 +38,23 @@ static int SCR_PADDING = 5;
 static int FILE_READ_FRQ = 20;      // no. of retries upon read failure
 static int FILE_READ_LAT = 50;      // wait interval between each retry (in milliseconds)
 
-// Debug log level activation flag
-static int DEBUG_MODE = 0;
+static int OPTION_MAX_SZ = 1;       // max. character width for any given menu option
+
+// Log framework control settings
+static char *SYS_LG_FILE, *INFO_LG_FILE, *WARN_LG_FILE, *ERROR_LG_FILE, *FATAL_LG_FILE, *DEBUG_LG_FILE;
+static char *SYS_LG_TITLE,*INFO_LG_TITLE,*WARN_LG_TITLE,*ERROR_LG_TITLE,*FATAL_LG_TITLE,*DEBUG_LG_TITLE;
+static int INFO_MODE = LG_MODE_CONSL, INFO_TMS_MODE = LG_MODE_FILE;
+static int WARN_MODE = LG_MODE_CONSL, WARN_TMS_MODE = LG_MODE_FILE;
+static int ERROR_MODE = LG_MODE_CONSL, ERROR_TMS_MODE = LG_MODE_FILE;
+static int FATAL_MODE = LG_MODE_CONSL, FATAL_TMS_MODE = LG_MODE_FILE;
+static int DEBUG_MODE, DEBUG_TMS_MODE = LG_MODE_FILE; 
 
 // Mandatory function prototype declarations
+static int   glbMode(char*); 
+static int   glbTMSMode(char*); 
+static char *glbFname(char*, const int);
+static char *glbTitle(char*, const int); 
+static char *tmstmp(char*);
 static void *get_console();
 static void *setnoecho_console(void*);
 static void *restore_console(void*, void*);
@@ -56,7 +73,7 @@ void clearScr() {
 }
 
 void printScrHMargin(int hMargin) {
-    printf("%*s", hMargin, "");
+    printf("%*s", hMargin < 0 ? 0 :hMargin, "");
 }
 
 void printScrVMargin(int vMargin) {
@@ -125,9 +142,10 @@ void printScrTopic(const char* caption, int cap_sz, const char* pattern, int mar
     }
 }
 
-int printScrHeader(const char* col_txt1, int col_sz1, const char* col_txt2, int col_sz2,   // supports up to 5 columns
+int printScrHeader(const char* col_txt1, int col_sz1, const char* col_txt2, int col_sz2,   // supports up to 6 columns
                    const char* col_txt3, int col_sz3, const char* col_txt4, int col_sz4, 
-                   const char* col_txt5, int col_sz5, const char* pattern, int margin) 
+                   const char* col_txt5, int col_sz5, const char* col_txt6, int col_sz6, 
+                   const char* pattern, int margin) 
 {   
     int hdr_sz = 0;
 
@@ -145,6 +163,9 @@ int printScrHeader(const char* col_txt1, int col_sz1, const char* col_txt2, int 
     }
     if (col_txt5) {
         hdr_sz += (col_sz5 = abs(col_sz5));
+    }
+    if (col_txt6) {
+        hdr_sz += (col_sz6 = abs(col_sz6));
     }
 
     if (margin < 0)
@@ -166,6 +187,9 @@ int printScrHeader(const char* col_txt1, int col_sz1, const char* col_txt2, int 
     }
     if (col_txt5) {
         printScrColText(col_txt5, col_sz5, NULL);
+    }
+    if (col_txt6) {
+        printScrColText(col_txt6, col_sz6, NULL);
     }
 
     printScrTopic("", hdr_sz, pattern, margin, 1);
@@ -235,9 +259,9 @@ char *trim (char* str, int str_sz, char* trstr, const int tr_mode)  // if trstr 
         }
     }
 
-    if (end >= 0 && str[end])
+    if (end >= 0 && str[end]) {
         str_sz++;
-
+    }
     for (st = 0; st <= end; st++, str++) {
         trstr[st] = *str;
     }
@@ -246,16 +270,63 @@ char *trim (char* str, int str_sz, char* trstr, const int tr_mode)  // if trstr 
     return trstr;
 }
 
-int isDigitStr(const char* str) {
+int isEmptyStr(char* str, const int chk_blnk_flg, char* trstr) 
+{
+    if (str == NULL)
+        return 1;
+
+    if (!*str) 
+    {
+        if (chk_blnk_flg && trstr) {
+            *trstr = '\0';
+        }
+        return 1;
+    }
+
+    if (!chk_blnk_flg)
+        return 0;
+
+    int   strsz = -1;
+    char* trtmp = trstr;
+
+    if (!trtmp) {
+        strsz = strlen(str);
+        trtmp = malloc((strsz + 1) *sizeof(char));
+    }
+    return !*trim(str, strsz, trtmp, 0);
+}
+
+int isDigitStr(char* str, const int is_zero_flg, const int len_mode_flg) {
     if (!str) { return 0; }
-    int len = strlen(str);
+    int len = strlen(str), dot_cnt = 0, i = 0;
     if (!len) { return 0; }
-    for (int i=0; i < len; i++) {
-        if (!isdigit(str[i])) {
+
+    if (len_mode_flg) 
+    {
+        while (i < len && (str[i] == ' ' || str[i] == '\t')) { i++; }    // ignore leading spaces
+
+        if (i == len) { return 0; }
+    }
+
+    for (; i < len; i++) 
+    {
+        if (len_mode_flg && (str[i] == ' ' || str[i] == '\t')) {
+            break;
+        }
+        if (!isdigit(str[i]) && (!len_mode_flg || *str != '-' && str[i] != '.') || isdigit(str[i]) && is_zero_flg && str[i] != '0') {
+            return 0;
+        } 
+        if (i > 0 && str[i] == '-' || str[i] == '.' && ++dot_cnt > 1) {
             return 0;
         }
     }
-    return 1;
+
+    if (len_mode_flg) 
+    {
+        while (i < len && (str[i] == ' ' || str[i] == '\t')) { i++; }     // ignore trailing spaces
+    }
+
+    return i == len;
 }
 
 
@@ -268,9 +339,11 @@ void flush() {
 }
 
 char *readChars(char* input, int input_sz, FILE* stream) {
-    char *result; int spn_len, retry = 0;
+    char *result = NULL;
 
-    if (input_sz > 0) {
+    if (stream && input && input_sz > 0) {
+
+        int spn_len, retry = 0;
 
         result = fgets(input, input_sz + 1, stream);  // fgets actually reads input_sz - 1 characters from the input stream
 
@@ -295,27 +368,27 @@ char *readChars(char* input, int input_sz, FILE* stream) {
 }
 
 int *readInt(int* input, int input_sz, FILE* stream) {
-    char *result; char str_input [input_sz];
+    char str_input [input_sz];
 
-    if (input_sz > 0) {
+    char* result = readChars(str_input, input_sz, stream);
 
-        result = readChars(str_input, input_sz, stream);
-
-        if (result && isDigitStr(str_input)) {
-           *input = atoi(str_input);
-            return input;
-        }
+    if (result && isDigitStr(str_input, 0, 0)) {
+       *input = atoi(str_input);
+        return input;
     }
-
     return NULL;
 }
 
 void* freadVal(void* input, const char* fmt, FILE* fptr) {
-    int retry = 0, result = fscanf(fptr, fmt, input); 
+    int result = 0, retry = 0;
+    if (fptr) 
+    {
+        result = fscanf(fptr, fmt, input); 
 
-    while (result < 0 && retry++ < FILE_READ_FRQ) {
-        msleep (FILE_READ_LAT);
-        result = fscanf(fptr, fmt, input);
+        while (result < 0 && retry++ < FILE_READ_FRQ) {
+            msleep (FILE_READ_LAT);
+            result = fscanf(fptr, fmt, input);
+        }
     }
     return result > 0 ? input : NULL;
 }
@@ -333,7 +406,7 @@ float* freadFloat(float* input, FILE* fptr) {
 }
 
 void readOption(int* input) {
-    readInt(input, 2, stdin);
+    readInt(input, OPTION_MAX_SZ + 1, stdin);
 }
 
 void promptInt(const char * message, int* input, int max_digits) {  // reads an integer value on the console input stream
@@ -365,25 +438,199 @@ void pauseScr(const char * message, const int alt_msg_flg) {
     restore_console(rfCnsl, oMode);
 }
 
-void log(char* level, int msg_type, char* msg_arg, char* msg_pst, FILE* ostream) {
+int scrLogInit(char* level) {
+    int fresult = -1;
+    char* fname = glbFname(level, 1);
+    FILE* fptr; 
 
-    if (!level) level = LVL_INFO;
-    if (!msg_pst) msg_pst = "";
+    if (fname && (fptr = fopen(fname, "w"))) {
+        fresult = fprintf(fptr, "*************** %s ***************", glbTitle(level, 1));
+        fclose(fptr);
+    }
+    return fresult;
+}
 
-    if (level != LVL_DEBUG || DEBUG_MODE)
-        switch(msg_type) {
-            case FILE_UNREADABLE:
-                fprintf(ostream, "%s%s does not exist or cannot be opened. %s", level, msg_arg, msg_pst);
-                break;
-            case FILE_CORRUPT:
-                fprintf(ostream, "%s%s is empty, corrupted or cannot be read. %s", level, msg_arg, msg_pst);
-                break;
-            case SYS_ERROR:
-                fprintf(ostream, "%sAn unexpected system error has occurred! %s", level, msg_pst);
-                break;
-            default:
-                fprintf(ostream, "%s%s", level, msg_pst);
+int scrLog(const char* level, char* alt_level, char* msg, int mode, int tms_mode, const int cntd_lg_flg) 
+{
+    const char* NL = cntd_lg_flg > 0 ? "":"\n";
+
+    int result = 0;
+    char tms[25];
+
+    if (cntd_lg_flg > 0) {
+        alt_level = "";
+    } else if (!alt_level) {
+        alt_level = level;
+    }
+
+    if (mode < 0) 
+    {  // use global log mode settings
+        mode = glbMode(level);
+    }
+
+    if (tms_mode < 0) 
+    {  // use global timestamp mode settings
+        tms_mode = glbTMSMode(level);
+    }
+
+    if (cntd_lg_flg > 0) {
+        tms[0] = '\0';
+    } 
+    else 
+    if (tms_mode > LG_MODE_OFF) {
+        tmstmp(&tms);
+    }
+
+    if (mode >= LG_MODE_CONSL && mode != LG_MODE_FILE) 
+    {
+        result = fprintf(stdout, "%s%s%s%s", NL, tms_mode >= LG_MODE_CONSL && tms_mode != LG_MODE_FILE ? tms : "", alt_level, msg);
+    }
+
+    if (mode >= LG_MODE_FILE) 
+    {
+        int fresult = -1;
+        char* fname = glbFname(level, 0);
+        FILE* fptr;
+
+        if (fname && (fptr = fopen(fname, "a"))) {
+            fresult = fprintf(fptr, "%s%s%s%s", NL, tms_mode >= LG_MODE_FILE ? tms : "", alt_level, msg);
+            fclose(fptr);
         }
+
+        if (result < 0 && fresult < 0 || result > 0 && fresult > 0) {
+            result += fresult;
+        } else if (fresult < 0) {
+            result = fresult;
+        }
+    }
+
+    return result;
+}
+
+int scrInf(char* alt_level, char* msg, const int cntd_lg_flg) {
+    return scrLog (LVL_INFO, alt_level, msg, -1, -1, cntd_lg_flg);
+}
+
+int scrWrn(char* alt_level, char* msg, const int cntd_lg_flg) {
+    return scrLog (LVL_WARN, alt_level, msg, -1, -1, cntd_lg_flg);
+}
+
+int scrErr(char* alt_level, char* msg, const int cntd_lg_flg) {
+    return scrLog (LVL_ERROR, alt_level, msg, -1, -1, cntd_lg_flg);
+}
+
+int scrFtl(char* alt_level, char* msg, const int cntd_lg_flg) {
+    return scrLog (LVL_FATAL, alt_level, msg, -1, -1, cntd_lg_flg);
+}
+
+int scrDbg(char* alt_level, char* msg, const int cntd_lg_flg, const int scr_pause_flg) {
+    int result = scrLog (LVL_DEBUG, alt_level, msg, -1, -1, cntd_lg_flg);
+    if (result) pauseScr(NULL, 0);
+    return result;
+}
+
+
+static int glbMode(char* level) 
+{
+    if (level == NULL)
+        return -1;
+    else
+    if (level == LVL_WARN)
+        return WARN_MODE;
+    else 
+    if (level == LVL_ERROR)
+        return ERROR_MODE;
+    else 
+    if (level == LVL_FATAL)
+        return FATAL_MODE;
+    else 
+    if (level == LVL_DEBUG)
+        return DEBUG_MODE;
+    else
+        return INFO_MODE;
+}
+
+static int glbTMSMode(char* level) 
+{
+    if (level == NULL)
+        return -1;
+    else
+    if (level == LVL_WARN)
+        return WARN_TMS_MODE;
+    else 
+    if (level == LVL_ERROR)
+        return ERROR_TMS_MODE;
+    else 
+    if (level == LVL_FATAL)
+        return FATAL_TMS_MODE;
+    else 
+    if (level == LVL_DEBUG)
+        return DEBUG_TMS_MODE;
+    else
+        return INFO_TMS_MODE;
+}
+
+static char *glbFname(char* level, const int strict_mode_flg) 
+{
+    if (level == NULL) {
+        return SYS_LG_FILE;
+    }
+
+    char* fname;
+
+    if (level == LVL_WARN)
+        fname = WARN_LG_FILE;
+    else
+    if (level == LVL_ERROR)
+        fname = ERROR_LG_FILE;
+    else 
+    if (level == LVL_FATAL)
+        fname = FATAL_LG_FILE;
+    else 
+    if (level == LVL_DEBUG)
+        fname = DEBUG_LG_FILE;
+    else
+        fname = INFO_LG_FILE;
+
+    if (!(strict_mode_flg || fname)) {
+        fname = SYS_LG_FILE;
+    }
+    return fname;
+}
+
+static char *glbTitle(char* level, const int strict_mode_flg) 
+{
+    if (level == NULL) {
+        return SYS_LG_TITLE? SYS_LG_TITLE: DEF_LG_TITLE;
+    }
+
+    char* title; 
+
+    if (level == LVL_WARN)
+        title = WARN_LG_TITLE;
+    else
+    if (level == LVL_ERROR)
+        title = ERROR_LG_TITLE;
+    else 
+    if (level == LVL_FATAL)
+        title = FATAL_LG_TITLE;
+    else 
+    if (level == LVL_DEBUG)
+        title = DEBUG_LG_TITLE;
+    else 
+        title = INFO_LG_TITLE;
+
+    if (!(strict_mode_flg || title)) {
+        title = SYS_LG_TITLE? SYS_LG_TITLE: DEF_LG_TITLE;
+    }
+    return title;
+}
+
+static char *tmstmp(char* tms) {
+    time_t t = time(NULL);
+    struct tm* tm = localtime(&t);
+    strftime(tms, 25, "[%Y-%m-%d %H:%M:%S] ", tm);
+    return tms;
 }
 
 static void *get_console() {
@@ -423,7 +670,7 @@ static void *setnoecho_console(void* rfCnsl)
         static DWORD fdwSaveOldMode, fdwMode;
 
         // Save the current input mode, to be restored on exit.
-        if (! GetConsoleMode(rfCnsl, &fdwSaveOldMode) )
+        if (!GetConsoleMode(rfCnsl, &fdwSaveOldMode) )
             return NULL;
         else
             oMode = &fdwSaveOldMode;
@@ -433,7 +680,7 @@ static void *setnoecho_console(void* rfCnsl)
         nMode = &fdwMode;
     }
 
-    if (! SetConsoleMode(rfCnsl, *(DWORD*)nMode) )
+    if (!SetConsoleMode(rfCnsl, *(DWORD*)nMode) )
         return NULL;
     else
         return oMode;
@@ -470,7 +717,7 @@ static void *restore_console(void* rfCnsl, void* oMode)
 #if defined(_WIN32) || defined(__CYGWIN__)  // Windows OS
 
     // Restore input mode on exit.
-    if (! SetConsoleMode(rfCnsl, *(DWORD*)oMode))
+    if (!SetConsoleMode(rfCnsl, *(DWORD*)oMode))
         return NULL;
     else
         return rfCnsl;
